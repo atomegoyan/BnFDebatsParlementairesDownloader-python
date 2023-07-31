@@ -2,6 +2,13 @@
 import sys
 import os
 
+# Exceptions tracking
+import traceback
+import logging
+
+# Signal handler
+import signal
+
 # Regexp
 import re
 
@@ -33,19 +40,56 @@ import MyCommonTools
 ##############################################################################
 
 # File containing the last line read
-g_file_last_line_name = "__last_url_resolved.cache"
+g_file_last_line_name = "__2-last_url_resolved.cache"
 
 # File with resolved URL / Date has one document
-prefix_resolved_file_name = "resolved_"
+prefix_resolved_file_name = "2-resolved_"
 
 # File with complex URL / Date has multiple documents
-prefix_complex_file_name = "complex_"
+prefix_complex_file_name = "2-complex_"
 
 # File with external URL / Date has one URL out of Gallica
-prefix_external_file_name = "external2_"
+prefix_external_file_name = "2-external_"
 
 # File with unresolved URL / Date has no document
-prefix_unresolved_file_name = "unresolved_"
+prefix_unresolved_file_name = "2-unresolved_"
+
+# Global "Current Line" (for signal processing)
+g_cur_line = 0
+
+
+### Signal handler
+
+# Main handler : save current line and exit
+def signal_graceful_exit():
+    print("ERROR: Stopped at line " + str(g_cur_line))
+    MyCommonTools.update_file_last_line(g_cur_line,
+                                        g_file_last_line_name)
+    sys.exit(-5)
+
+# SIGTERM handler
+def signal_term_handler(signal, frame):
+    print("!!!!! SIGTERM CAUGHT !!!!!")
+    signal_graceful_exit()
+
+# Default handler
+def signal_default_handler(sig_num, frame):
+    signal_num = str(sig_num)
+    signal_name = str(signal.Signals(sig_num).name)
+    print("!!!!! SIGNAL (" + signal_num + " " + signal_name + ") CAUGHT !!!!!")
+    signal_graceful_exit()
+
+# Declare which signals to handle
+def signal_declare_handlers():
+    ## SIGTERM = regular "kill"
+    signal.signal(signal.SIGTERM, signal_term_handler)
+    ## SIGINT = Ctrl+C
+    signal.signal(signal.SIGINT, signal_default_handler)
+    ## SIGABRT = abort(3)
+    signal.signal(signal.SIGABRT, signal_default_handler)
+    ## SIGQUIT = quit from keyboard
+    signal.signal(signal.SIGQUIT, signal_default_handler)
+
 
 ### Small tools
 
@@ -100,8 +144,8 @@ def get_ressource_url(url):
     req = urllib.request.Request(url)
     print("trying request...")
     try:
-        # Send request
-        response = urllib.request.urlopen(req)
+        # Send request + Limit by time
+        response = urllib.request.urlopen(req, timeout=600)
 
     # Exception HTTP Error
     except urllib.error.HTTPError as e:
@@ -134,6 +178,24 @@ def get_ressource_url(url):
         else:
             print("(no e.read())")
         print("#############")
+        return (None, None)
+
+    # Timeout reached
+    except TimeoutError as e:
+        print("### TIMEOUT ERROR:")
+        print("# Connection has been hanged... (probably because of no answer from server)")
+        print("# Stopped at page " + str(page))
+        print(str(e))
+        print("#############")
+        return (None, None)
+
+    # Catch "Ctrl + C" closer
+    except KeyboardInterrupt as e:
+        print("### KEYBOARD INTERRUPT (Ctrl+C ?):")
+        print("# Stopped at page " + str(page))
+        print(str(e))
+        print("#############")
+        logging.error(traceback.format_exc())
         return (None, None)
 
     # All other exceptions (like "http.client.RemoteDisconnected")
@@ -197,6 +259,7 @@ def get_ressource_url(url):
 # Resolve a URL and extract its Ark ID
 ## Return value : Ark ID + contains multiple docs ? + external of gallica ?
 def get_ark_id_from_date_URL(url_date):
+    global g_cur_line
     # Let's resolve date URL and obtain the new URL
     #url_resolved = get_ressource_url(url_date)
     answers = get_ressource_url(url_date)
@@ -251,6 +314,7 @@ def process_lines(lines):
 
     # File has been read and is in memory, everything is fine
     cur_line = 0
+    g_cur_line = 0
     max_line = len(lines)
     ## Open the temporary file for last processed line
     if (os.path.isfile(g_file_last_line_name)):
@@ -258,11 +322,18 @@ def process_lines(lines):
         file_last_line = fd.read()
         fd.close()
         cur_line = int(file_last_line)
+        g_cur_line = cur_line
 
+    # Be aware of signals from now [When context has been put back]
+    signal_declare_handlers()
     ## Update the unresolved log for saying an instance has been launched
     now = datetime.datetime.now()
-    update_file_unresolved_log("# Launching URL resolver/Ark ID solver at " +
-                               now.strftime("%d/%m/%Y %H:%M:%S"))
+    try:
+        update_file_unresolved_log("# Launching URL resolver/Ark ID solver at " +
+                                   now.strftime("%d/%m/%Y %H:%M:%S"))
+    except IOError:
+        print("+++ IOError AT BEGINNING while writing in Unresolved log +++")
+        return (-3)
 
     # Continue the process of the file from the last state
     url_resolved_filename = prefix_resolved_file_name + url_filename_input
@@ -284,11 +355,13 @@ def process_lines(lines):
 
         # if ark_id was not found, write down the number where it failed and stop
         if (ark_id is None):
-            MyCommonTools.update_file_last_line(cur_line,
-                                                g_file_last_line_name)
-            print("ERROR: Failed at line " + str(cur_line))
-            print("DATE : " + date)
-            print("URL : " + url)
+            #print("ERROR: Failed at line " + str(cur_line))
+            #print("DATE : " + date)
+            #print("URL : " + url)
+            #MyCommonTools.update_file_last_line(cur_line,
+            #                                    g_file_last_line_name)
+            MyCommonTools.error_save_last_line(cur_line, date, url,
+                                               g_file_last_line_name)
             return (-3)
 
         # if URL hasn't changed, let's skip it (add write it in the unresolved log)
@@ -298,40 +371,70 @@ def process_lines(lines):
             if (multiple_docs == False):
                 #update_file_unresolved_log(url)
                 ### Add day and name of the day in the log
-                DOTW = MyCommonTools.get_day_or_the_week(date)
-                line_unresolved = date + " " + DOTW + " " + url
-                update_file_unresolved_log(line_unresolved)
                 print("=> No document found")
+                try:
+                    DOTW = MyCommonTools.get_day_or_the_week(date)
+                    line_unresolved = date + " " + DOTW + " " + url
+                    update_file_unresolved_log(line_unresolved)
+                except IOError:
+                    print("+++ IOError while writing in Unresolved log +++")
+                    MyCommonTools.error_save_last_line(cur_line, date, url,
+                                                       g_file_last_line_name)
+                    return (-3)
             else:
-                line_complex = date + " " + url
-                MyCommonTools.update_file_ouput(line_complex, url_complex_filename)
                 print("=> Multiple documents found")
+                try:
+                    line_complex = date + " " + url
+                    MyCommonTools.update_file_ouput(line_complex,
+                                                    url_complex_filename)
+                except IOError:
+                    print("+++ IOError while writing in Complex log +++")
+                    MyCommonTools.error_save_last_line(cur_line, date, url,
+                                                       g_file_last_line_name)
+                    return (-3)
             ###
             print("#############################################################")
             cur_line += 1
+            g_cur_line = cur_line
             continue
 
         # if resolved link is external of gallica, let's write it in specific file
         if (external_gallica == True):
-            line_external = date + " " + url
-            MyCommonTools.update_file_ouput(line_external, url_external_filename)
             print("=> External URL")
+            try:
+                line_external = date + " " + url
+                MyCommonTools.update_file_ouput(line_external,
+                                                url_external_filename)
+            except IOError:
+                print("+++ IOError while writing in External log +++")
+                MyCommonTools.error_save_last_line(cur_line, date, url,
+                                                   g_file_last_line_name)
+                return (-3)
             ###
             print("#############################################################")
             cur_line += 1
+            g_cur_line = cur_line
             continue
 
         # if everything OK, let's write the result in the output file
         #update_file_ouput(ark_id, url_resolved_filename_output)
         ### Add date before Ark_ID
         # out format : "YYYY-MM-DD Ark_ID"
-        line_resolved = date + " " + ark_id
-        MyCommonTools.update_file_ouput(line_resolved, url_resolved_filename)
         print("=> One document found")
+        try:
+            line_resolved = date + " " + ark_id
+            MyCommonTools.update_file_ouput(line_resolved,
+                                            url_resolved_filename)
+        except IOError:
+            print("+++ IOError while writing in Resolved log +++")
+            MyCommonTools.error_save_last_line(cur_line, date, url,
+                                               g_file_last_line_name)
+            return (-3)
         ###
         print("#############################################################")
         # read next line
         cur_line += 1
+        g_cur_line = cur_line
 
     # If everything ended well, let's remove the cache file with last state
     if (os.path.exists(g_file_last_line_name)):
@@ -357,6 +460,7 @@ def process_lines(lines):
         os.rename(url_external_filename, url_external_filename_final)
     else:
         print("--no external cases file were created during this script--")
+    print("<<< LIST PROCESSING CORRECTLY FINISHED ! >>>")
 
     return (0)
 
@@ -397,7 +501,9 @@ def main():
             exit(-2)
 
         # In other case, when evrything is fine, let's process lines
+        MyCommonTools.print_time("%%%% BEGIN PROCESSING")
         ret = process_lines(lines)
+        MyCommonTools.print_time("%%%% END PROCESSING")
 
         exit(ret)
 

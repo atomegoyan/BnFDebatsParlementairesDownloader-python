@@ -3,6 +3,13 @@ import sys
 import os
 from io import StringIO, BytesIO
 
+# Exceptions tracking
+import traceback
+import logging
+
+# Signal handler
+import signal
+
 # Regexp
 import re
 
@@ -50,16 +57,52 @@ import MyCommonTools
 ##############################################################################
 
 # File containing the last line read
-g_file_last_line_name = "__last_multiple_document_checked.cache"
+g_file_last_line_name = "__3-last_multiple_document_checked.cache"
 
 # File with resolved-bis URL
-prefix_resolved_bis_file_name = "resolved-bis_"
+prefix_resolved_bis_file_name = "3-resolved-mul_"
 
 # File with external URL
-prefix_external_bis_file_name = "external3_"
+prefix_external_bis_file_name = "3-external-mul_"
 
 # File with undownloaded URL
-prefix_unresolved_file_name = "unresolved-bis_"
+prefix_unresolved_file_name = "3-unresolved-mul_"
+
+# Global "Current Line" (for signal processing)
+g_cur_line = 0
+
+### Signal handler
+
+# Main handler : save current line and exit
+def signal_graceful_exit():
+    print("ERROR: Stopped at line " + str(g_cur_line))
+    MyCommonTools.update_file_last_line(g_cur_line,
+                                        g_file_last_line_name)
+    sys.exit(-5)
+
+# SIGTERM handler
+def signal_term_handler(signal, frame):
+    print("!!!!! SIGTERM CAUGHT !!!!!")
+    signal_graceful_exit()
+
+# Default handler
+def signal_default_handler(sig_num, frame):
+    signal_num = str(sig_num)
+    signal_name = str(signal.Signals(sig_num).name)
+    print("!!!!! SIGNAL (" + signal_num + " " + signal_name + ") CAUGHT !!!!!")
+    signal_graceful_exit()
+
+# Declare which signals to handle
+def signal_declare_handlers():
+    ## SIGTERM = regular "kill"
+    signal.signal(signal.SIGTERM, signal_term_handler)
+    ## SIGINT = Ctrl+C
+    signal.signal(signal.SIGINT, signal_default_handler)
+    ## SIGABRT = abrot(3)
+    signal.signal(signal.SIGABRT, signal_default_handler)
+    ## SIGQUIT = quit from keyboard
+    signal.signal(signal.SIGQUIT, signal_default_handler)
+
 
 ### Small tools
 
@@ -161,6 +204,14 @@ def get_web_page(url):
         driver.quit()
         return (None)
 
+    # Catch "Ctrl + C" closer
+    except KeyboardInterrupt as e:
+        print("### KEYBOARD INTERRUPT (Ctrl+C ?):")
+        print(str(e))
+        print("#############")
+        logging.error(traceback.format_exc())
+        return (None)
+
     # All other exceptions
     except Exception as e:
         print("### UNKNOWN ERROR WHEN REACHING URL:")
@@ -190,6 +241,12 @@ def get_web_page(url):
                 print(str(e))
                 print("#############")
                 driver.quit()
+                return (None)
+            except KeyboardInterrupt as e:
+                print("### KEYBOARD INTERRUPT (Ctrl+C ?):")
+                print(str(e))
+                print("#############")
+                logging.error(traceback.format_exc())
                 return (None)
             except Exception as e:
                 print("##### UNKNOWN ERROR WHEN REACHING URL:")
@@ -254,10 +311,12 @@ def get_web_page(url):
 
 # For each line, get the web page and process each result-id
 def process_lines(lines):
+    global g_cur_line
     url_filename_input = os.path.basename(sys.argv[1])
 
     # File has been read and is in memory, everything is fine
     cur_line = 0
+    g_cur_line = 0
     max_line = len(lines)
     ## Open the temporary file for last processed line
     if (os.path.isfile(g_file_last_line_name)):
@@ -265,11 +324,19 @@ def process_lines(lines):
         file_last_line = fd.read()
         fd.close()
         cur_line = int(file_last_line)
+        g_cur_line = cur_line
 
+    # Be aware of signals from now [When context has been put back]
+    signal_declare_handlers()
     ## Update the unresolved log for saying an instance has been launched
     now = datetime.datetime.now()
-    update_file_unresolved_log("# Launching URL multiple docs getter at " +
-                               now.strftime("%d/%m/%Y %H:%M:%S"))
+    try:
+        update_file_unresolved_log("# Launching URL multiple docs getter at " +
+                                   now.strftime("%d/%m/%Y %H:%M:%S"))
+    except IOErrror:
+        print("+++ IOError AT BEGINNING while writing in Unresolved log +++")
+        return (-3)
+
     # Continue the process of the file from the last state
     url_resolved_filename = prefix_resolved_bis_file_name + url_filename_input
     url_external_filename = prefix_external_bis_file_name + url_filename_input
@@ -286,11 +353,13 @@ def process_lines(lines):
         URLs = get_web_page(url)
 
         if (URLs is None):
-            MyCommonTools.update_file_last_line(cur_line,
-                                                g_file_last_line_name)
-            print("ERROR: Failed at line " + str(cur_line))
-            print("DATE : " + date)
-            print("URL : " + url)
+            #print("ERROR: Failed at line " + str(cur_line))
+            #print("DATE : " + date)
+            #print("URL : " + url)
+            #MyCommonTools.update_file_last_line(cur_line,
+            #                                    g_file_last_line_name)
+            MyCommonTools.error_save_last_line(cur_line, date, url,
+                                               g_file_last_line_name)
             return (-3)
 
         ## Write down the URLs
@@ -298,18 +367,35 @@ def process_lines(lines):
         for new_url in URLs:
             ## If URL is external of Gallica, let's write it in specific file
             if (not (MyCommonTools.check_gallica_url(new_url))):
-                line_external = date + "-" + str(i) + " " + new_url
-                MyCommonTools.update_file_ouput(line_external, url_external_filename)
+                print("=> External URL")
+                try:
+                    line_external = date + "-" + str(i) + " " + new_url
+                    MyCommonTools.update_file_ouput(line_external,
+                                                    url_external_filename)
+                except IOError:
+                    print("+++ IOError while writing in External log +++")
+                    MyCommonTools.error_save_last_line(cur_line, date, url,
+                                                       g_file_last_line_name)
+                    return (-3)
             else:
                 ## else, let's put it in the regular file
-                ark_id = extract_ark_id_from_url(new_url)
-                line_resolved = date + "-" + str(i) + " " + ark_id
-                MyCommonTools.update_file_ouput(line_resolved, url_resolved_filename)
+                print("=> Document found")
+                try:
+                    ark_id = extract_ark_id_from_url(new_url)
+                    line_resolved = date + "-" + str(i) + " " + ark_id
+                    MyCommonTools.update_file_ouput(line_resolved, url_resolved_filename)
+                except IOError:
+                    print("+++ IOError while writing in Resolved log +++")
+                    MyCommonTools.error_save_last_line(cur_line, date, url,
+                                                       g_file_last_line_name)
+                    return (-3)
+
             i += 1
         ###
         print("#############################################################")
         # read next line
         cur_line += 1
+        g_cur_line = cur_line
 
     # If everything ended well, let's remove the cache file with last state
     if (os.path.exists(g_file_last_line_name)):
@@ -328,6 +414,7 @@ def process_lines(lines):
         os.rename(url_external_filename, url_external_filename_final)
     else:
         print("--no external cases file were created during this script--")
+    print("<<< LIST PROCESSING CORRECTLY FINISHED ! >>>")
 
     return (0)
 
@@ -367,7 +454,9 @@ def main():
             exit(-2)
 
 	# In other case, when evrything is fine, let's process lines
+        MyCommonTools.print_time("%%%% BEGIN PROCESSING")
         ret = process_lines(lines)
+        MyCommonTools.print_time("%%%% END PROCESSING")
 
         exit(ret)
 

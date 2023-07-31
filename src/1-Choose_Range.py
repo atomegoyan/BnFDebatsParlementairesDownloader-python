@@ -7,6 +7,9 @@ import re
 # Date
 import datetime
 
+### Contains small tools for dates and others
+import MyCommonTools
+
 ## OLD
 # Prefix common to all parliamentary debates
 #g_prefix_debates = "https://gallica.bnf.fr/ark:/12148/cb328020951/"
@@ -27,11 +30,27 @@ import datetime
 ##
 ##########################################################################
 
+# File with dates and URL
+prefix_list_file_name = "1-list_url_"
+
+### Small tools
+
 # Check arguments format
 def check_date_format(date_str):
     # Expected Input : "1893-07-22"  --  "YYYY-mm-dd"
     match = re.fullmatch("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", date_str)
     return (match != None)
+
+# Write out a list into a file
+def write_list_to_file(input_list, filename):
+    # Clear file first
+    fd = open(filename, 'w')
+    fd.truncate(0)
+    fd.close()
+    # Then write out the list
+    with open(filename, 'w') as fp:
+        fp.write('\n'.join(input_list))
+    fp.close()
 
 # Transform my format of date into a datetime object
 def transforms_date_to_datetime(input_date):
@@ -49,6 +68,8 @@ def transforms_datetime_to_triplet(input_datetime):
     date_triplet = [ day, month, year ]
     return (date_triplet)
 
+### Main range generators of dates and URLs
+
 # Generate a list of dates (day by day) in datetime object
 def generate_list_of_dates(first_date, last_date):
     date_begin = transforms_date_to_datetime(first_date)
@@ -61,7 +82,7 @@ def generate_list_of_dates(first_date, last_date):
 
     return (list_of_dates)
 
-# Create a list of URL from the list of dates
+# Create a list of URL from the list of dates (add prefix to the dates)
 def transform_list_of_dates_into_url(list_of_dates, url_prefix, url_suffix):
     list_of_url = []
     for date in list_of_dates:
@@ -83,22 +104,43 @@ def transform_list_of_dates_into_url(list_of_dates, url_prefix, url_suffix):
 # Generate a list of URL from two dates in my format and the URL prefix + suffix
 def generate_list_of_URL(first_date, last_date, url_prefix, url_suffix):
     # Input : "1893-07-22"  --  "YYYY-mm-dd"
-    list_of_dates = generate_list_of_dates(first_date, last_date)
+
     list_of_url = transform_list_of_dates_into_url(list_of_dates,
                                                    url_prefix,
                                                    url_suffix)
     return (list_of_url)
 
-# Write out a list into a file
-def write_list_to_file(input_list, filename):
-    # Clear file first
-    fd = open(filename, 'w')
-    fd.truncate(0)
-    fd.close()
-    # Then write out the list
-    with open(filename, 'w') as fp:
-        fp.write('\n'.join(input_list))
-    fp.close()
+### Main program
+
+# Process the arguments by generating and writing lists
+def process_dates_prefix(first_date, last_date, prefix_url, suffix_url):
+    # Reverse dates if in incorrect order
+    if (transforms_date_to_datetime(first_date) >
+        transforms_date_to_datetime(last_date)):
+        tmp = first_date
+        first_date = last_date
+        last_date = tmp
+
+    # Generates list of dates
+    dates_list = generate_list_of_dates(first_date, last_date)
+
+    # Generated a URL list by extending the dates in a list
+    url_list = transform_list_of_dates_into_url(dates_list,
+                                                prefix_url,
+                                                suffix_url)
+    nb_lines = len(url_list)
+
+    # Write out results
+    try:
+        filename = prefix_list_file_name + first_date + "_"  + last_date + ".txt"
+        write_list_to_file(url_list, filename)
+    except IOError:
+        print("+++ IOError while writing the output file +++")
+        print("  filename : " + str(filename))
+        return (-1)
+    print("<<< LIST PROCESSING CORRECTLY FINISHED ! >>>")
+
+    return (nb_lines)
 
 # Check for arguments in the CLI
 def main():
@@ -138,17 +180,10 @@ def main():
         prefix_url = sys.argv[3] + "date"
         suffix_url = ""
 
-        # Reverse dates if in incorrect order
-        if (transforms_date_to_datetime(first_date) >
-            transforms_date_to_datetime(last_date)):
-            tmp = first_date
-            first_date = last_date
-            last_date = tmp
+        MyCommonTools.print_time("%%%% BEGIN PROCESSING")
+        ret = process_dates_prefix(first_date, last_date, prefix_url, suffix_url)
+        MyCommonTools.print_time("%%%% END PROCESSING")
 
-        url_list = generate_list_of_URL(first_date, last_date,
-                                        prefix_url, suffix_url)
-        filename = "list_url_" + first_date + "_"  + last_date + ".txt"
-        write_list_to_file(url_list, filename)
         return (0)
 
 main()

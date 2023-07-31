@@ -2,6 +2,13 @@
 import sys
 import os
 
+# Exceptions tracking
+import traceback
+import logging
+
+# Signal handler
+import signal
+
 # Regexp
 import re
 
@@ -33,10 +40,46 @@ import MyCommonTools
 ##############################################################################
 
 # File containing the last line read
-g_file_last_line_name = "__last_ark_id_pdf_downloaded.cache"
+g_file_last_line_name = "__4P-last_ark_id_pdf_downloaded.cache"
 
 # File with unresolved URL
-prefix_undownloaded_file_name = "undownloaded_"
+prefix_undownloaded_file_name = "4P-undownloaded_"
+
+# Global "Current Line" (for signal processing)
+g_cur_line = 0
+
+### Signal handler
+
+# Main handler : save current line and exit
+def signal_graceful_exit():
+    print("ERROR: Stopped at line " + str(g_cur_line))
+    MyCommonTools.update_file_last_line(g_cur_line,
+                                        g_file_last_line_name)
+    sys.exit(-5)
+
+# SIGTERM handler
+def signal_term_handler(signal, frame):
+    print("!!!!! SIGTERM CAUGHT !!!!!")
+    signal_graceful_exit()
+
+# Default handler
+def signal_default_handler(sig_num, frame):
+    signal_num = str(sig_num)
+    signal_name = str(signal.Signals(sig_num).name)
+    print("!!!!! SIGNAL (" + signal_num + " " + signal_name + ") CAUGHT !!!!!")
+    signal_graceful_exit()
+
+# Declare which signals to handle
+def signal_declare_handlers():
+    ## SIGTERM = regular "kill"
+    signal.signal(signal.SIGTERM, signal_term_handler)
+    ## SIGINT = Ctrl+C
+    signal.signal(signal.SIGINT, signal_default_handler)
+    ## SIGABRT = abrot(3)
+    signal.signal(signal.SIGABRT, signal_default_handler)
+    ## SIGQUIT = quit from keyboard
+    signal.signal(signal.SIGQUIT, signal_default_handler)
+
 
 ### Small tools
 
@@ -87,17 +130,12 @@ def get_document_PDF_debat_parlementaire(ark_id, directory_output, filename_pref
     req = urllib.request.Request(url)
     print("trying request...")
     try:
-        # Send request
-        response = urllib.request.urlopen(req)
+        # Send request + Limit by time
+        response = urllib.request.urlopen(req, timeout=600)
 
     # Exception HTTP Error
     except urllib.error.HTTPError as e:
-        ## Error 503 : we reached the end of the document
-        if (page == 1):
-            print("### HTTP ERROR ON PAGE 1:")
-        else:
-            print("### HTTP ERROR:")
-
+        print("### HTTP ERROR:")
         if hasattr(e, 'reason'):
             print('Failed to reach a server.')
             print('Reason: ', e.reason)
@@ -130,6 +168,24 @@ def get_document_PDF_debat_parlementaire(ark_id, directory_output, filename_pref
         page_exist = False
         return (None)
 
+     # Timeout reached
+    except TimeoutError as e:
+        print("### TIMEOUT ERROR:")
+        print("# Connection has been hanged... (probably because of no answer from server)")
+        print("# Stopped at page " + str(page))
+        print(str(e))
+        print("#############")
+        return (None)
+
+    # Catch "Ctrl + C" closer
+    except KeyboardInterrupt as e:
+        print("### KEYBOARD INTERRUPT (Ctrl+C ?):")
+        print("# Stopped at page " + str(page))
+        print(str(e))
+        print("#############")
+        logging.error(traceback.format_exc())
+        return (None)
+
     # All other exceptions (like "http.client.RemoteDisconnected")
     except Exception as e:
         print("### UNKNOWN ERROR:")
@@ -150,14 +206,19 @@ def get_document_PDF_debat_parlementaire(ark_id, directory_output, filename_pref
         #text = data.decode(info.get_param('charset', 'utf-8'))
         #text = data.decode('utf-8')
         print("## url_new : " + str(url_new))
-        print("## headers : " + str(headers))
+        #print("## headers : " + str(headers))
         print("## status  : " + str(status))
 
         # Write out the current file
-        out_file = open(directory_output + "/" + pdffile, 'wb')
-        out_file.truncate(0)
-        out_file.write(data)
-        out_file.close()
+        try:
+            out_file = open(directory_output + "/" + pdffile, 'wb')
+            out_file.truncate(0)
+            out_file.write(data)
+            out_file.close()
+        except IOError:
+            print("++++ IOError : Couldn't write the PDF output file ++++")
+            print("  output filename : " + str(directory_output + "/" + pdffile))
+            return (None, error_503)
 
         print("###################################")
 
@@ -167,8 +228,10 @@ def get_document_PDF_debat_parlementaire(ark_id, directory_output, filename_pref
 
 # For each line, try to download all of the JPEG
 def process_lines(lines):
+    global g_cur_line
     # File has been read and is in memory, everything is fine
     cur_line = 0
+    g_cur_line = 0
     max_line = len(lines)
     ## Open the temporary file for last processed line
     if (os.path.isfile(g_file_last_line_name)):
@@ -176,11 +239,18 @@ def process_lines(lines):
         file_last_line = fd.read()
         fd.close()
         cur_line = int(file_last_line)
+        g_cur_line = cur_line
 
+    # Be aware of signals from now [When context has been put back]
+    signal_declare_handlers()
     ## Update the undownloaded log for saying an instance has been launched
     now = datetime.datetime.now()
-    update_file_undownloaded_log("# Launching Ark ID downloader for debates at " +
-                                 now.strftime("%d/%m/%Y %H:%M:%S"))
+    try:
+        update_file_undownloaded_log("# Launching Ark ID downloader for debates at " +
+                                     now.strftime("%d/%m/%Y %H:%M:%S"))
+    except IOErrror:
+        print("+++ IOError AT BEGINNING while writing in Undownloaded log +++")
+        return (-3)
 
     ## Prepare output directory
     dirname_output = sys.argv[1]
@@ -207,22 +277,33 @@ def process_lines(lines):
                                                              filename_prefix)
 
         ## If an error occurred, let's save where we were
-        #if (pages_written == None):
-        #    update_file_last_line(cur_line, g_file_last_line_name)
-        #    update_file_error_log("Failed at line " + str(cur_line))
-        #    update_file_error_log("Ark ID : " + ark_id)
-        #    return (-3)
+        if (pages_written == None):
+            print("=> No document to download found")
+            try:
+                line_undownloaded = date + " " + ark_id
+                update_file_undownloaded_log(line_undownloaded)
+                ### IF YOU WISH TO STOP THE SCRIPT IN CASE OF ERROR, UNCOMMENT RETURN
+                MyCommonTools.error_save_last_line(cur_line, date, ark_id,
+                                                   g_file_last_line_name)
+                return (-3)
+            except IOError:
+                print("+++ IOError while writing in Undownloaded log +++")
+                MyCommonTools.error_save_last_line(cur_line, date, ark_id,
+                                                   g_file_last_line_name)
+                return (-3)
 
         ## If only one page were written... do something ? [unusable in the PDF case]
         #if (pages_written == 1):
         #    update_file_unresolved_log(url)
         #    cur_line += 1
+        #    g_cur_line = cur_line
         #    continue
         ######################
 
         print("#############################################################")
         # read next line
         cur_line += 1
+        g_cur_line = cur_line
 
     # If everything ended well, let's remove the cache file with last state
     if (os.path.exists(g_file_last_line_name)):
@@ -230,6 +311,7 @@ def process_lines(lines):
     # And let's rename the folder by adding a "_FINAL" inside
     dirname_final = dirname_output + "_PDF" + "_" + MyCommonTools.get_date_and_time()
     os.rename(dirname_output + "_WIP_PDF",  dirname_final)
+    print("<<< LIST PROCESSING CORRECTLY FINISHED ! >>>")
 
     return (0)
 
@@ -270,7 +352,9 @@ def main():
 
 
         # In other case, when evrything is fine, let's process lines
+        MyCommonTools.print_time("%%%% BEGIN PROCESSING")
         ret = process_lines(lines)
+        MyCommonTools.print_time("%%%% END PROCESSING")
 
         exit(ret)
 
